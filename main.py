@@ -1,5 +1,6 @@
 import discord
 import os
+import functools
 from discord import app_commands, Interaction
 from discord.ext import commands
 from datetime import datetime
@@ -18,6 +19,77 @@ bot.queues = {}
 
 def log_command(interaction: Interaction, name: str, **kwargs):
     print(f"[{datetime.now()}][{interaction.channel}] {interaction.user} used \"/{name}\" with {kwargs}")
+
+# views
+
+class PlayerUI(discord.ui.View):
+    PREV_LABEL = "|◁"
+    NEXT_LABEL = "▷|"
+    PAUSE_LABEL = "▷"
+    RESUME_LABEL = "||"
+    NO_REPEAT_LABEL = "↻"
+    REPEAT_ALL_LABEL = "↻."
+    REPEAT_THIS_LABEL = "↻₁"
+    NO_SHUFFLE_LABEL = "⇄"
+    NORMAL_SHUFFLE_LABEL = "⇄."
+    SMART_SHUFFLE_LABEL = "⇄✧"
+
+    @staticmethod
+    def interaction_respond(func):
+        @functools.wraps(func)
+        async def wrapper(self, interaction: Interaction, *args, **kwargs):
+            await interaction.response.defer()
+            await func(self, interaction, *args, **kwargs)
+            await interaction.edit_original_response(content="", view=self)
+        return wrapper
+
+    def __init__(self, music_queue: MusicQueue) -> None:
+        super().__init__()
+        self.music_queue = music_queue
+    
+    @discord.ui.button(label=NO_SHUFFLE_LABEL, style=discord.ButtonStyle.grey)
+    @interaction_respond
+    async def shuffle(self, interaction: Interaction, button: discord.ui.Button):
+        self.music_queue.shuffle_next()
+        match self.music_queue.shuffle_mode:
+            case self.music_queue.ShuffleMode.NO_SHUFFLE:
+                button.label = self.NO_SHUFFLE_LABEL
+            case self.music_queue.ShuffleMode.NORMAL_SHUFFLE:
+                button.label = self.NORMAL_SHUFFLE_LABEL
+            case self.music_queue.ShuffleMode.SMART_SHUFFLE:
+                button.label = self.SMART_SHUFFLE_LABEL
+
+    @discord.ui.button(label=PREV_LABEL, style=discord.ButtonStyle.grey)
+    @interaction_respond
+    async def prev(self, interaction: Interaction, button: discord.ui.Button):
+        self.music_queue.play_prev()
+
+    @discord.ui.button(label=RESUME_LABEL, style=discord.ButtonStyle.grey)
+    @interaction_respond
+    async def pause(self, interaction: Interaction, button: discord.ui.Button):
+        if self.music_queue.is_playing:
+            self.music_queue.pause()
+            button.label = self.PAUSE_LABEL
+        else:
+            self.music_queue.resume()
+            button.label = self.RESUME_LABEL
+    
+    @discord.ui.button(label=NEXT_LABEL, style=discord.ButtonStyle.grey)
+    @interaction_respond
+    async def next(self, interaction: Interaction, button: discord.ui.Button):
+        self.music_queue.play_next()
+
+    @discord.ui.button(label=NO_REPEAT_LABEL, style=discord.ButtonStyle.grey)
+    @interaction_respond
+    async def repeat(self, interaction: Interaction, button: discord.ui.Button):
+        self.music_queue.repeat_next()
+        match self.music_queue.repeat_mode:
+            case self.music_queue.RepeatMode:
+                button.label = self.NO_REPEAT_LABEL
+            case self.music_queue.RepeatMode.REPEAT_THIS:
+                button.label = self.REPEAT_THIS_LABEL
+            case self.music_queue.RepeatMode.REPEAT_ALL:
+                button.label = self.REPEAT_ALL_LABEL
 
 # events
 
@@ -49,16 +121,40 @@ async def on_command_error(interaction: Interaction, error: commands.CommandErro
 async def play(interaction: Interaction, query: str):
     log_command(interaction, "play", query=query)
     try:
+        view = None
         if interaction.guild.voice_client is None:
             if interaction.user.voice is None:
                 await interaction.response.send_message(content="You're not connected to a voice channel")
                 return
             await interaction.user.voice.channel.connect()
             bot.queues[interaction.guild.id] = MusicQueue(interaction.guild.voice_client)
-        await interaction.response.send_message(content="Searching for song...")
-        response = bot.queues[interaction.guild.id].enqueue(query, False)
-        await interaction.edit_original_response(content=f"Added `{response.title}` to the queue")
-        bot.queues[interaction.guild.id].play_next()
+            view = PlayerUI(music_queue=bot.queues[interaction.guild.id])
+        await interaction.response.defer(thinking=True)
+        response = bot.queues[interaction.guild.id].enqueue(query, is_url=False)
+        await interaction.edit_original_response(content=f"Added `{response.title}` to the queue", view=view)
+        if not bot.queues[interaction.guild.id].is_playing:
+            bot.queues[interaction.guild.id].play_next()
+    except Exception as e:
+        print(e)    
+
+@bot.tree.command(name="playlink", description="Play a song")
+@app_commands.describe(link="Your link")
+async def playlink(interaction: Interaction, link: str):
+    log_command(interaction, "playlink", link=link)
+    try:
+        view = None
+        if interaction.guild.voice_client is None:
+            if interaction.user.voice is None:
+                await interaction.response.send_message(content="You're not connected to a voice channel")
+                return
+            await interaction.user.voice.channel.connect()
+            bot.queues[interaction.guild.id] = MusicQueue(interaction.guild.voice_client)
+            view = PlayerUI(music_queue=bot.queues[interaction.guild.id])
+        await interaction.response.defer(thinking=True)
+        response = bot.queues[interaction.guild.id].enqueue(link, is_url=True)
+        await interaction.edit_original_response(content=f"Added `{response.title}` to the queue", view=view)
+        if not bot.queues[interaction.guild.id].is_playing:
+            bot.queues[interaction.guild.id].play_next()
     except Exception as e:
         print(e)
 
@@ -157,7 +253,10 @@ async def help(interaction: Interaction):
     embed.set_author(name=bot.user.display_name, icon_url=bot.user.avatar.url)
     if bot.user.banner is not None:
         embed.set_thumbnail(url=bot.user.banner.url)
-    await interaction.response.send_message(content="", embed=embed)
+    try:
+        await interaction.response.send_message(content="", embed=embed)
+    except Exception as e:
+        print(e)
 
 def main():
     bot.run(token=DISCORD_TOKEN)
